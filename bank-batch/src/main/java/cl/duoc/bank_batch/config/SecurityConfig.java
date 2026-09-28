@@ -80,24 +80,32 @@ public class SecurityConfig {
 
                 .authorizeHttpRequests(auth -> auth
 
-                        .requestMatchers("/auth/login", "/api/debug/**")
+                        // RUTAS PUBLICAS
+                        .requestMatchers(
+                                "/auth/login",
+                                "/api/debug/**",
+                                "/api/kafka/**"
+                        )
                         .permitAll()
 
+                        // BFF WEB
                         .requestMatchers("/api/bff/web/**")
                         .hasRole("WEB")
 
+                        // BFF MOVIL
                         .requestMatchers("/api/bff/movil/**")
                         .hasRole("MOVIL")
 
+                        // BFF CAJERO
                         .requestMatchers("/api/bff/cajero/**")
                         .hasRole("CAJERO")
 
+                        // CUALQUIER OTRA RUTA REQUIERE AUTENTICACION
                         .anyRequest()
                         .authenticated()
                 )
 
-
-                // JWT se procesa antes de la autenticación estándar.
+                // JWT SE PROCESA ANTES DE LA AUTENTICACION ESTANDAR
                 .addFilterBefore(
                         jwtAuthenticationFilter,
                         UsernamePasswordAuthenticationFilter.class

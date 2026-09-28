@@ -1,6 +1,6 @@
-# Backend III - Exp3_S6: Microservicios y Seguridad en la Nube con Spring Cloud
+# Backend III - Sistema Bancario con Spring Batch, Microservicios, Seguridad y Eventos
 
-Proyecto grupal (Backend III, PBY2203) que evoluciona el sistema bancario `bank-batch` hacia una arquitectura de microservicios usando Spring Cloud. Se agregan configuracion centralizada, service discovery, tolerancia a fallos y microservicios adicionales, manteniendo el procesamiento batch y las APIs BFF ya desarrolladas en entregas anteriores.
+Proyecto grupal (Backend III, PBY2203) que evoluciona el sistema bancario `bank-batch` hacia una arquitectura de microservicios usando Spring Cloud. Se agregan configuracion centralizada, service discovery, tolerancia a fallos, microservicios adicionales y mensajeria asincrona con Apache Kafka, manteniendo el procesamiento batch y las APIs BFF ya desarrolladas en entregas anteriores.
 
 ## Arquitectura general
 
@@ -11,6 +11,8 @@ Proyecto grupal (Backend III, PBY2203) que evoluciona el sistema bancario `bank-
 | `bank-batch` | 8443 (HTTPS) | Microservicio principal: batch bancario + BFFs + JWT + Circuit Breaker |
 | `clientes-service` | 8091 | Microservicio de clientes, seguridad Basic Auth |
 | `cuentas-service` | 8092 | Microservicio de cuentas, seguridad Basic Auth |
+| `banco-postgres` | 5433 -> 5432 | Base de datos PostgreSQL local |
+| `banco-kafka` | 9092 -> 9092 | Broker Apache Kafka local |
 
 Todos los microservicios (`bank-batch`, `clientes-service`, `cuentas-service`) se registran en `eureka-server` y consumen configuracion desde `config-server`.
 
@@ -37,32 +39,37 @@ El Circuit Breaker (Resilience4j) se implementa desde `bank-batch`, actuando com
 - Spring Cloud 2025.1.2 (Config Server, Eureka, Resilience4j)
 - Spring Security
 - PostgreSQL 16 (Docker Compose)
+- Apache Kafka (Docker Compose)
 - Maven Wrapper
 
 ## Orden de arranque
 
 ```powershell
-# 1. Base de datos
-docker compose up -d      # (dentro de bank-batch/)
-
-# 2. Config Server
-cd config-server
-.\mvnw.cmd spring-boot:run
-
-# 3. Eureka Server
-cd eureka-server
-.\mvnw.cmd spring-boot:run
-
-# 4. bank-batch
+# 1. Infraestructura Docker: PostgreSQL y Kafka
 cd bank-batch
+docker compose up -d
+
+# 2. Comprobar contenedores
+docker ps
+
+# 3. Config Server
+cd ..\config-server
+.\mvnw.cmd spring-boot:run
+
+# 4. Eureka Server
+cd ..\eureka-server
 .\mvnw.cmd spring-boot:run
 
 # 5. clientes-service
-cd clientes-service
+cd ..\clientes-service
 .\mvnw.cmd spring-boot:run
 
 # 6. cuentas-service
-cd cuentas-service
+cd ..\cuentas-service
+.\mvnw.cmd spring-boot:run
+
+# 7. bank-batch
+cd ..\bank-batch
 .\mvnw.cmd spring-boot:run
 ```
 
@@ -118,7 +125,7 @@ Muestra todas las instancias registradas con su estado (`UP`/`DOWN`).
 
 # Microservicio: Bank Batch
 
-Proyecto Java/Spring Boot para procesamiento batch de datos bancarios con PostgreSQL y exposicion de APIs BFF protegidas con JWT para los canales Web, Movil y Cajero. Ahora tambien consume Config Server, se registra en Eureka e implementa tolerancia a fallos con Resilience4j.
+Proyecto Java/Spring Boot para procesamiento batch de datos bancarios con PostgreSQL y exposicion de APIs BFF protegidas con JWT para los canales Web, Movil y Cajero. Ahora tambien consume Config Server, se registra en Eureka, implementa tolerancia a fallos con Resilience4j y publica/consume eventos mediante Apache Kafka.
 
 ## Descripcion
 
@@ -137,6 +144,7 @@ El sistema incluye:
 - Configuracion centralizada via Config Server.
 - Registro en Eureka Service Discovery.
 - Tolerancia a fallos con Resilience4j (Circuit Breaker + Fallback) al consumir `clientes-service`.
+- Mensajeria asincrona con Apache Kafka sobre el topic `banco.transacciones`.
 
 ## Tecnologias
 
@@ -147,8 +155,10 @@ El sistema incluye:
 - Spring JDBC
 - Spring Web
 - Spring Security
+- Spring Kafka
 - JJWT 0.12.6
 - PostgreSQL 16
+- Apache Kafka
 - Docker Compose
 - Maven Wrapper
 
@@ -256,9 +266,11 @@ Movimientos anuales:
 - Acepta `deposito`, `retiro` y `compra`.
 - Genera resumen anual por cuenta.
 
-## Base de datos
+## Infraestructura Docker
 
-PostgreSQL se levanta con `docker-compose.yml`:
+La infraestructura local de `bank-batch` se levanta con `docker-compose.yml` e incluye PostgreSQL y Apache Kafka.
+
+### PostgreSQL
 
 | Configuracion | Valor |
 |---|---|
@@ -268,6 +280,16 @@ PostgreSQL se levanta con `docker-compose.yml`:
 | Usuario | `postgres` |
 | Password | `postgres` |
 | Puerto local | `5433` |
+
+### Apache Kafka
+
+| Configuracion | Valor |
+|---|---|
+| Imagen | `bitnamilegacy/kafka:4.0.0-debian-12-r10` |
+| Contenedor | `banco-kafka` |
+| Puerto local | `9092` |
+| Listener anunciado | `PLAINTEXT://localhost:9092` |
+| Protocolo | `PLAINTEXT` |
 
 El archivo `src/main/resources/schema.sql` crea estas tablas:
 
@@ -309,24 +331,51 @@ resilience4j.circuitbreaker.instances.clientesService.sliding-window-size=5
 resilience4j.circuitbreaker.instances.clientesService.minimum-number-of-calls=3
 resilience4j.circuitbreaker.instances.clientesService.failure-rate-threshold=50
 resilience4j.circuitbreaker.instances.clientesService.wait-duration-in-open-state=5000
+
+# Kafka
+spring.kafka.bootstrap-servers=localhost:9092
+spring.kafka.consumer.group-id=bank-batch-group
+spring.kafka.consumer.auto-offset-reset=earliest
+spring.kafka.consumer.key-deserializer=org.apache.kafka.common.serialization.StringDeserializer
+spring.kafka.consumer.value-deserializer=org.apache.kafka.common.serialization.StringDeserializer
+spring.kafka.producer.key-serializer=org.apache.kafka.common.serialization.StringSerializer
+spring.kafka.producer.value-serializer=org.apache.kafka.common.serialization.StringSerializer
+
+# Mensajeria
+mensaje.origen=bank-batch
 ```
 
 Importante: `spring.batch.job.enabled=false` evita que los jobs se ejecuten automaticamente al iniciar la aplicacion. Para ejecutar un job desde consola, se debe habilitar explicitamente en los argumentos.
+
+### Dependencias Kafka verificadas
+
+En `bank-batch/pom.xml` la integracion con Kafka se encuentra declarada mediante:
+
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-kafka</artifactId>
+</dependency>
+```
 
 ## Requisitos
 
 - JDK 21
 - Docker Desktop o Docker Engine
 - PowerShell, CMD o terminal compatible
+- Infraestructura Docker activa: `banco-postgres` y `banco-kafka`
 - `config-server`, `eureka-server` y `clientes-service` corriendo previamente
 
 ## Ejecucion
 
-### 1. Levantar PostgreSQL
+### 1. Levantar infraestructura local
 
 ```powershell
 docker compose up -d
+docker ps
 ```
+
+Debe quedar activo `banco-postgres` para la base de datos y `banco-kafka` para la mensajeria asincrona.
 
 ### 2. Compilar
 
@@ -407,6 +456,7 @@ Reglas de autorizacion:
 - `/api/bff/web/**` requiere rol `WEB`.
 - `/api/bff/movil/**` requiere rol `MOVIL`.
 - `/api/bff/cajero/**` requiere rol `CAJERO`.
+- `/api/debug/**` y `/api/kafka/**` estan permitidos publicamente para pruebas academicas locales.
 - El resto de rutas requiere autenticacion.
 
 El token JWT dura 1 hora.
@@ -495,9 +545,124 @@ Realizar retiro:
 }
 ```
 
+## Arquitectura orientada a eventos
+
+La nueva implementacion incorpora Apache Kafka para desacoplar la generacion de eventos de su procesamiento. En este enfoque, `TransaccionProducer` publica mensajes en un topic y `TransaccionConsumer` los procesa de forma asincrona, sin que el cliente que invoca el endpoint dependa directamente del consumidor.
+
+Kafka es apropiado para este caso porque permite separar productores y consumidores, mantener eventos disponibles en el broker y procesarlos mediante un grupo consumidor. Para la demostracion academica, el mensaje enviado representa una transaccion o evento bancario procesado por el sistema.
+
+### Flujo de eventos
+
+```text
+Cliente / Postman
+        |
+        v
+KafkaTestController
+        |
+        v
+TransaccionProducer
+        |
+        v
+Apache Kafka
+Topic: banco.transacciones
+        |
+        v
+TransaccionConsumer
+Consumer Group: bank-batch-group
+```
+
+| Elemento | Implementacion |
+|---|---|
+| Broker | Apache Kafka |
+| Topic | `banco.transacciones` |
+| Producer | `TransaccionProducer` |
+| Consumer | `TransaccionConsumer` |
+| Consumer Group | `bank-batch-group` |
+| Endpoint de prueba | `POST /api/kafka/enviar` |
+| Tipo de comunicacion | Asincrona |
+
+### Endpoint de prueba Kafka
+
+```http
+POST /api/kafka/enviar?mensaje={mensaje}
+```
+
+Ejemplo probado:
+
+```powershell
+curl.exe -k -X POST "https://localhost:8443/api/kafka/enviar?mensaje=SegundoEventoKafka"
+```
+
+Respuesta observada:
+
+```text
+Evento enviado a Kafka: SegundoEventoKafka
+```
+
+### Pruebas Kafka
+
+Enviar evento:
+
+```powershell
+curl.exe -k -X POST "https://localhost:8443/api/kafka/enviar?mensaje=PruebaKafkaSemana7"
+```
+
+Debe responder con el texto `Evento enviado a Kafka: PruebaKafkaSemana7`.
+
+Listar topics:
+
+```powershell
+docker exec banco-kafka kafka-topics.sh --bootstrap-server localhost:9092 --list
+```
+
+Debe aparecer el topic `banco.transacciones`.
+
+Ver mensajes:
+
+```powershell
+docker exec banco-kafka kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic banco.transacciones --from-beginning --timeout-ms 10000
+```
+
+Debe mostrar los mensajes enviados al topic durante las pruebas.
+
+Comprobar Consumer Group:
+
+```powershell
+docker exec banco-kafka kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --group bank-batch-group
+```
+
+En la prueba realizada se observo `CURRENT-OFFSET = 2`, `LOG-END-OFFSET = 2` y `LAG = 0`. Esto demuestra que el grupo consumidor proceso todos los mensajes disponibles y no tenia eventos pendientes.
+
+### Diagrama de arquitectura de eventos
+
+Espacio reservado para insertar posteriormente el diagrama realizado en draw.io.
+
+```markdown
+<!-- Agregar aqui la imagen cuando exista dentro del repositorio. Ejemplo:
+![Arquitectura de eventos y tolerancia a fallos](ruta-de-la-imagen)
+-->
+```
+
+El diagrama debe representar:
+
+- Cliente/Postman -> Bank Batch -> KafkaTestController -> TransaccionProducer -> Apache Kafka -> Topic `banco.transacciones` -> TransaccionConsumer.
+- Bank Batch / ClientesClient -> clientes-service -> Resilience4j -> `fallbackClientes()`.
+
 ## Tolerancia a fallos
 
 `ClientesClient` implementa un Circuit Breaker (Resilience4j) sobre las llamadas hacia `clientes-service`. Si el servicio no responde o falla repetidamente, el circuito se abre y las siguientes peticiones reciben una respuesta de fallback en lugar de un error 500.
+
+La implementacion real utiliza la anotacion:
+
+```java
+@CircuitBreaker(name = "clientesService", fallbackMethod = "fallbackClientes")
+```
+
+`ClientesClient` consume el endpoint:
+
+```text
+http://localhost:8091/api/clientes
+```
 
 ```http
 GET /api/debug/clientes
@@ -506,7 +671,27 @@ GET /api/debug/clientes
 Comportamiento esperado:
 
 - Con `clientes-service` activo: devuelve la lista de clientes obtenida en tiempo real.
-- Con `clientes-service` caido (tras varias solicitudes fallidas): devuelve el mensaje de fallback `"clientes-service no disponible temporalmente"`.
+- Con `clientes-service` detenido: Resilience4j ejecuta `fallbackClientes()` y devuelve:
+
+```json
+{"error":"clientes-service no disponible temporalmente"}
+```
+
+- Con `clientes-service` iniciado nuevamente: el endpoint vuelve a entregar la lista de clientes.
+
+Esto demuestra tolerancia a fallos y recuperacion del servicio consumidor sin provocar la caida de `bank-batch`.
+
+### Pruebas Resilience4j
+
+```powershell
+curl.exe -k "https://localhost:8443/api/debug/clientes"
+```
+
+Resultados esperados:
+
+- Con `clientes-service` activo: lista de clientes.
+- Con `clientes-service` detenido: `{"error":"clientes-service no disponible temporalmente"}`.
+- Con `clientes-service` iniciado nuevamente: lista de clientes.
 
 ## Consultas utiles
 
@@ -518,6 +703,10 @@ SELECT * FROM movimientos_anuales;
 SELECT * FROM resumen_anual;
 SELECT * FROM retiros_cajero;
 ```
+
+## Evidencias sugeridas para la entrega
+
+Para el informe o presentacion final se recomienda respaldar la implementacion con capturas de Docker, envio y consumo de eventos Kafka, estado del Consumer Group con `LAG = 0`, prueba del fallback de Resilience4j y recuperacion de `clientes-service`. Las imagenes no se referencian en este README porque todavia no existen archivos de evidencias dentro del repositorio.
 
 ---
 
@@ -625,13 +814,13 @@ GET http://localhost:8092/api/cuentas
 
 ## Detener entorno
 
-Detener PostgreSQL:
+Detener infraestructura local:
 
 ```powershell
 docker compose down
 ```
 
-Detener PostgreSQL y eliminar el volumen:
+Detener infraestructura local y eliminar el volumen de PostgreSQL:
 
 ```powershell
 docker compose down -v

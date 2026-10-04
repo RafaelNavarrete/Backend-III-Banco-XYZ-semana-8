@@ -1,833 +1,229 @@
-# Backend III - Sistema Bancario con Spring Batch, Microservicios, Seguridad y Eventos
+# Backend III - Exp3 S8: Microservicios seguros y resilientes en la nube
 
-Proyecto grupal (Backend III, PBY2203) que evoluciona el sistema bancario `bank-batch` hacia una arquitectura de microservicios usando Spring Cloud. Se agregan configuracion centralizada, service discovery, tolerancia a fallos, microservicios adicionales y mensajeria asincrona con Apache Kafka, manteniendo el procesamiento batch y las APIs BFF ya desarrolladas en entregas anteriores.
+Actividad sumativa individual (PBY2203) de Rafael Navarrete. Evoluciona el sistema bancario `bank-batch` hacia una arquitectura de microservicios lista para la nube: autenticacion con **OAuth 2.0**, tolerancia a fallos con **Resilience4j**, mensajeria asincrona con **Apache Kafka** y despliegue completo con **Docker** y **docker-compose**.
 
-## Arquitectura general
+## Objetivo
+
+- Proteger el sistema con OAuth 2.0 (flujo `client_credentials`) mediante un servidor de autorizacion propio.
+- Dockerizar todos los microservicios con imagenes multi-stage.
+- Orquestar todos los componentes con un unico `docker-compose.yml`.
+- Aplicar Circuit Breaker, Retry y Bulkhead (Resilience4j) en las llamadas entre microservicios.
+- Integrar mensajeria asincrona con Kafka.
+
+## Arquitectura
 
 | Componente | Puerto | Rol |
 |---|---|---|
-| `config-server` | 8888 | Servidor de configuracion centralizada (modo native) |
+| `auth-server` | 9000 | Servidor de autorizacion OAuth 2.0 (Spring Authorization Server) |
+| `config-server` | 8888 | Configuracion centralizada (modo native) |
 | `eureka-server` | 8761 | Service Discovery |
-| `bank-batch` | 8443 (HTTPS) | Microservicio principal: batch bancario + BFFs + JWT + Circuit Breaker |
-| `clientes-service` | 8091 | Microservicio de clientes, seguridad Basic Auth |
-| `cuentas-service` | 8092 | Microservicio de cuentas, seguridad Basic Auth |
-| `banco-postgres` | 5433 -> 5432 | Base de datos PostgreSQL local |
-| `banco-kafka` | 9092 -> 9092 | Broker Apache Kafka local |
+| `bank-batch` | 8443 (HTTPS) | Batch bancario + BFFs + Resource Server OAuth2 + Resilience4j + Kafka |
+| `clientes-service` | 8091 | Microservicio de clientes (Basic Auth interno) |
+| `cuentas-service` | 8092 | Microservicio de cuentas (Basic Auth interno) |
+| `postgres` | 5433 -> 5432 | Base de datos PostgreSQL 16 |
+| `kafka` | 9092 | Broker Apache Kafka |
 
-Todos los microservicios (`bank-batch`, `clientes-service`, `cuentas-service`) se registran en `eureka-server` y consumen configuracion desde `config-server`.
-
-### Nota de diseño: Tolerancia a fallos
-
-El Circuit Breaker (Resilience4j) se implementa desde `bank-batch`, actuando como consumidor de `clientes-service`. Esta decision sigue el patron estandar de microservicios: el mecanismo de tolerancia a fallos se ubica en quien realiza la llamada remota, no en el servicio que solo expone datos. Por restriccion de tiempo, no se replico el mismo patron para `cuentas-service`, pero la implementacion es identica y facilmente escalable a otros consumidores.
+```text
+Cliente --(1. token)--> auth-server
+Cliente --(2. Bearer token)--> bank-batch --(Resilience4j)--> clientes-service
+                                  |
+                                  +--> PostgreSQL
+                                  +--> Kafka (topic banco.transacciones)
+bank-batch / clientes / cuentas --> Eureka + Config Server
+```
 
 ## Estructura del repositorio
 
 ```text
 .
-|-- bank-batch/
-|-- config-server/
-|-- eureka-server/
-|-- clientes-service/
-|-- cuentas-service/
+|-- docker-compose.yml
+|-- auth-server/        (Dockerfile, pom.xml, src)
+|-- config-server/      (Dockerfile, pom.xml, src)
+|-- eureka-server/      (Dockerfile, pom.xml, src)
+|-- clientes-service/   (Dockerfile, pom.xml, src)
+|-- cuentas-service/    (Dockerfile, pom.xml, src)
+|-- bank-batch/         (Dockerfile, pom.xml, src)
 `-- README.md
 ```
 
-## Tecnologias generales
-
-- Java 21
-- Spring Boot 4.1.0
-- Spring Cloud 2025.1.2 (Config Server, Eureka, Resilience4j)
-- Spring Security
-- PostgreSQL 16 (Docker Compose)
-- Apache Kafka (Docker Compose)
-- Maven Wrapper
-
-## Orden de arranque
-
-```powershell
-# 1. Infraestructura Docker: PostgreSQL y Kafka
-cd bank-batch
-docker compose up -d
-
-# 2. Comprobar contenedores
-docker ps
-
-# 3. Config Server
-cd ..\config-server
-.\mvnw.cmd spring-boot:run
-
-# 4. Eureka Server
-cd ..\eureka-server
-.\mvnw.cmd spring-boot:run
-
-# 5. clientes-service
-cd ..\clientes-service
-.\mvnw.cmd spring-boot:run
-
-# 6. cuentas-service
-cd ..\cuentas-service
-.\mvnw.cmd spring-boot:run
-
-# 7. bank-batch
-cd ..\bank-batch
-.\mvnw.cmd spring-boot:run
-```
-
-Verificacion: `http://localhost:8761` debe mostrar los tres microservicios (`BANK-BATCH`, `CLIENTES-SERVICE`, `CUENTAS-SERVICE`) con estado `UP`.
-
----
-
-# Microservicio: Config Server
-
-Servidor de configuracion centralizada en modo `native`, que sirve archivos de configuracion locales a los microservicios que lo consumen.
-
-## Configuracion
-
-```properties
-server.port=8888
-spring.application.name=config-server
-spring.profiles.active=native
-spring.cloud.config.server.native.search-locations=classpath:/config
-```
-
-## Prueba
-
-```text
-GET http://localhost:8888/bank-batch/default
-```
-
-Devuelve un JSON con la configuracion centralizada disponible para `bank-batch`.
-
----
-
-# Microservicio: Eureka Server
-
-Servidor de Service Discovery. Los demas microservicios se registran aqui para poder ser localizados por nombre logico en vez de IP/puerto fijo.
-
-## Configuracion
-
-```properties
-server.port=8761
-spring.application.name=eureka-server
-eureka.client.register-with-eureka=false
-eureka.client.fetch-registry=false
-```
-
-## Panel de administracion
-
-```text
-http://localhost:8761
-```
-
-Muestra todas las instancias registradas con su estado (`UP`/`DOWN`).
-
----
-
-# Microservicio: Bank Batch
-
-Proyecto Java/Spring Boot para procesamiento batch de datos bancarios con PostgreSQL y exposicion de APIs BFF protegidas con JWT para los canales Web, Movil y Cajero. Ahora tambien consume Config Server, se registra en Eureka, implementa tolerancia a fallos con Resilience4j y publica/consume eventos mediante Apache Kafka.
-
-## Descripcion
-
-La aplicacion procesa archivos CSV bancarios, valida y normaliza la informacion, guarda los resultados en PostgreSQL y expone datos consolidados mediante endpoints REST separados por canal.
-
-El sistema incluye:
-
-- Procesamiento batch de transacciones diarias.
-- Calculo de intereses de cuentas.
-- Procesamiento de movimientos anuales.
-- Generacion de resumenes diarios y anuales.
-- APIs BFF para Web, Movil y Cajero.
-- Autenticacion con JWT.
-- Autorizacion por rol de canal.
-- HTTPS local con keystore PKCS12.
-- Configuracion centralizada via Config Server.
-- Registro en Eureka Service Discovery.
-- Tolerancia a fallos con Resilience4j (Circuit Breaker + Fallback) al consumir `clientes-service`.
-- Mensajeria asincrona con Apache Kafka sobre el topic `banco.transacciones`.
-
 ## Tecnologias
 
-- Java 21
-- Spring Boot 4.1.0
-- Spring Cloud 2025.1.2 (Config Client, Eureka Client, Resilience4j)
-- Spring Batch
-- Spring JDBC
-- Spring Web
-- Spring Security
-- Spring Kafka
-- JJWT 0.12.6
-- PostgreSQL 16
-- Apache Kafka
-- Docker Compose
-- Maven Wrapper
+- Java 21, Spring Boot 4.1.x
+- Spring Cloud (Config Server, Eureka, Resilience4j)
+- Spring Security: Authorization Server y Resource Server (OAuth 2.0 / JWT)
+- Spring Batch, Spring JDBC, Spring Kafka
+- PostgreSQL 16, Apache Kafka
+- Docker y Docker Compose
 
-## Estructura principal
+## Como ejecutar
 
-```text
-bank-batch/
-|-- docker-compose.yml
-|-- pom.xml
-|-- src
-|   |-- main
-|   |   |-- java/cl/duoc/bank_batch
-|   |   |   |-- BankBatchApplication.java
-|   |   |   |-- bff
-|   |   |   |   |-- cajero
-|   |   |   |   |-- movil
-|   |   |   |   `-- web
-|   |   |   |-- client
-|   |   |   |-- config
-|   |   |   |-- model
-|   |   |   |-- policy
-|   |   |   |-- processor
-|   |   |   `-- security
-|   |   `-- resources
-|   |       |-- application.properties
-|   |       |-- bank-batch.p12
-|   |       |-- schema.sql
-|   |       `-- data
-|   |           |-- cuentas_anuales.csv
-|   |           |-- intereses.csv
-|   |           `-- transacciones.csv
-|   `-- test
+Requisitos: Docker Desktop activo (Engine running). No se necesita Java ni Maven en la maquina, porque las imagenes se compilan dentro de Docker.
+
+```powershell
+# Desde la raiz del repositorio
+docker compose up -d --build
+docker compose ps
 ```
 
-## Arquitectura BFF
+La primera construccion demora unos minutos. Deben quedar los 8 contenedores en estado `Up` (Postgres en `healthy`).
 
-El proyecto usa una arquitectura BFF, o Backend For Frontend, separada por canal. Cada canal tiene su propio controlador, servicio o logica de negocio asociada, y DTOs especificos para exponer solamente los datos que necesita ese consumidor.
+Verificacion: `http://localhost:8761` debe mostrar `BANK-BATCH`, `CLIENTES-SERVICE` y `CUENTAS-SERVICE`.
 
-Flujo actual por canal:
+Ver logs de un servicio:
 
-```text
-Web    -> WebBffController    -> WebBffService   -> WebResumenDTO
-Movil  -> MovilBffController  -> MovilBffService -> MovilResumenDTO
-Cajero -> CajeroBffController -> CajeroService   -> SaldoCajeroDTO / RetiroResponseDTO
+```powershell
+docker compose logs bank-batch --tail 50
 ```
 
-### Mejora implementada: DTOs por canal
+Detener todo:
 
-Como mejora aplicada a partir de la sugerencia docente de la entrega anterior, las respuestas de los BFF ahora usan DTOs especificos en vez de construir respuestas directamente con `Map<String, Object>`.
+```powershell
+docker compose down        # conserva los datos de PostgreSQL
+docker compose down -v     # elimina tambien el volumen
+```
 
-DTOs implementados:
+## Dockerizacion
 
-- `WebResumenDTO`
-- `MovilResumenDTO`
-- `SaldoCajeroDTO`
-- `RetiroResponseDTO`
+Cada microservicio tiene un `Dockerfile` multi-stage:
 
-Esta mejora deja explicito el contrato de datos de cada canal, facilita entender que campos devuelve cada endpoint y reduce el acoplamiento entre controladores y estructura de respuesta. Tambien mejora la modularidad, mantenibilidad y escalabilidad del proyecto, porque cada BFF puede evolucionar su respuesta sin afectar innecesariamente a los otros canales.
+1. Etapa de construccion: `maven:3.9-eclipse-temurin-21`, compila con `mvn clean package -DskipTests`.
+2. Etapa final: `eclipse-temurin:21-jre`, solo contiene el `.jar` resultante.
 
-## Jobs batch
+### docker-compose.yml
 
-El proyecto define tres jobs:
+Orquesta los 8 componentes en una red comun donde los servicios se resuelven por nombre (`postgres`, `kafka`, `auth-server`, etc.). Decisiones principales:
 
-| Job | Archivo de entrada | Resultado principal |
-|---|---|---|
-| `transaccionJob` | `data/transacciones.csv` | `transacciones_procesadas` y `resumen_diario` |
-| `interesJob` | `data/intereses.csv` | `cuentas_intereses` |
-| `estadoCuentaJob` | `data/cuentas_anuales.csv` | `movimientos_anuales` y `resumen_anual` |
+- `postgres` tiene `healthcheck` (`pg_isready`) y `bank-batch` espera a que este `healthy`.
+- `restart: on-failure` en los servicios que dependen de otros, para tolerar el orden de arranque.
+- Kafka expone dos listeners: `localhost:9092` para el host y `kafka:29092` para los contenedores.
+- La configuracion cambia por variables de entorno (sin tocar el codigo):
 
-Los steps trabajan con chunks de 5 registros, procesamiento multihilo, reintentos para errores transitorios de base de datos y una politica personalizada de skips.
-
-### Calidad de datos
-
-`CustomSkipPolicy` permite omitir errores controlados hasta un limite de 100 registros, entre ellos:
-
-- `FlatFileParseException`
-- `NumberFormatException`
-- `DateTimeParseException`
-- `IllegalArgumentException`
-
-`DataQualityDecider` valida el porcentaje de omisiones. Si supera el 10% de los registros evaluados, el job falla con estado `CALIDAD_INSUFICIENTE`.
-
-### Validaciones principales
-
-Transacciones:
-
-- Normaliza fechas en formatos `yyyy-MM-dd`, `dd-MM-yyyy`, `dd/MM/yyyy` y `yyyy/MM/dd`.
-- Valida montos nulos, negativos o iguales a cero.
-- Normaliza el tipo de transaccion.
-- Acepta `credito` y `debito`.
-- Marca anomalias en vez de descartar registros procesables.
-
-Intereses:
-
-- Valida nombre, saldo, edad y tipo de cuenta.
-- Acepta cuentas `ahorro` y `prestamo`.
-- Calcula 1% de interes para ahorro.
-- Calcula 2% de interes para prestamo.
-- Guarda tasa, interes calculado, saldo final, validez y observacion.
-
-Movimientos anuales:
-
-- Normaliza fechas.
-- Valida monto, tipo de movimiento y descripcion.
-- Acepta `deposito`, `retiro` y `compra`.
-- Genera resumen anual por cuenta.
-
-## Infraestructura Docker
-
-La infraestructura local de `bank-batch` se levanta con `docker-compose.yml` e incluye PostgreSQL y Apache Kafka.
-
-### PostgreSQL
-
-| Configuracion | Valor |
+| Variable | Valor en Docker |
 |---|---|
-| Imagen | `postgres:16` |
-| Contenedor | `banco-postgres` |
-| Base de datos | `banco` |
-| Usuario | `postgres` |
-| Password | `postgres` |
-| Puerto local | `5433` |
+| `SPRING_DATASOURCE_URL` | `jdbc:postgresql://postgres:5432/banco` |
+| `SPRING_KAFKA_BOOTSTRAP_SERVERS` | `kafka:29092` |
+| `SPRING_CONFIG_IMPORT` | `optional:configserver:http://config-server:8888` |
+| `EUREKA_CLIENT_SERVICEURL_DEFAULTZONE` | `http://eureka-server:8761/eureka/` |
+| `SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWKSETURI` | `http://auth-server:9000/oauth2/jwks` |
+| `CLIENTES_URL` | `http://clientes-service:8091` |
 
-### Apache Kafka
+## Seguridad: OAuth 2.0
 
-| Configuracion | Valor |
-|---|---|
-| Imagen | `bitnamilegacy/kafka:4.0.0-debian-12-r10` |
-| Contenedor | `banco-kafka` |
-| Puerto local | `9092` |
-| Listener anunciado | `PLAINTEXT://localhost:9092` |
-| Protocolo | `PLAINTEXT` |
+`auth-server` (Spring Authorization Server) emite tokens JWT con el flujo `client_credentials`. Hay un client por canal y cada uno recibe su propio scope:
 
-El archivo `src/main/resources/schema.sql` crea estas tablas:
-
-- `transacciones_procesadas`
-- `cuentas_intereses`
-- `movimientos_anuales`
-- `resumen_anual`
-- `resumen_diario`
-- `retiros_cajero`
-
-## Configuracion
-
-```properties
-spring.datasource.url=jdbc:postgresql://localhost:5433/banco
-spring.datasource.username=postgres
-spring.datasource.password=postgres
-spring.datasource.driver-class-name=org.postgresql.Driver
-
-spring.sql.init.mode=always
-spring.sql.init.schema-locations=classpath:schema.sql
-
-spring.batch.jdbc.initialize-schema=never
-spring.batch.job.enabled=false
-
-server.port=8443
-server.ssl.enabled=true
-server.ssl.key-store=classpath:bank-batch.p12
-server.ssl.key-store-password=changeit
-server.ssl.key-store-type=PKCS12
-server.ssl.key-alias=bank-batch
-
-# Spring Cloud
-spring.config.import=optional:configserver:http://localhost:8888
-eureka.client.service-url.defaultZone=http://localhost:8761/eureka/
-eureka.instance.prefer-ip-address=true
-
-# Resilience4j - Circuit Breaker hacia clientes-service
-resilience4j.circuitbreaker.instances.clientesService.sliding-window-size=5
-resilience4j.circuitbreaker.instances.clientesService.minimum-number-of-calls=3
-resilience4j.circuitbreaker.instances.clientesService.failure-rate-threshold=50
-resilience4j.circuitbreaker.instances.clientesService.wait-duration-in-open-state=5000
-
-# Kafka
-spring.kafka.bootstrap-servers=localhost:9092
-spring.kafka.consumer.group-id=bank-batch-group
-spring.kafka.consumer.auto-offset-reset=earliest
-spring.kafka.consumer.key-deserializer=org.apache.kafka.common.serialization.StringDeserializer
-spring.kafka.consumer.value-deserializer=org.apache.kafka.common.serialization.StringDeserializer
-spring.kafka.producer.key-serializer=org.apache.kafka.common.serialization.StringSerializer
-spring.kafka.producer.value-serializer=org.apache.kafka.common.serialization.StringSerializer
-
-# Mensajeria
-mensaje.origen=bank-batch
-```
-
-Importante: `spring.batch.job.enabled=false` evita que los jobs se ejecuten automaticamente al iniciar la aplicacion. Para ejecutar un job desde consola, se debe habilitar explicitamente en los argumentos.
-
-### Dependencias Kafka verificadas
-
-En `bank-batch/pom.xml` la integracion con Kafka se encuentra declarada mediante:
-
-```xml
-<dependency>
-    <groupId>org.springframework.boot</groupId>
-    <artifactId>spring-boot-starter-kafka</artifactId>
-</dependency>
-```
-
-## Requisitos
-
-- JDK 21
-- Docker Desktop o Docker Engine
-- PowerShell, CMD o terminal compatible
-- Infraestructura Docker activa: `banco-postgres` y `banco-kafka`
-- `config-server`, `eureka-server` y `clientes-service` corriendo previamente
-
-## Ejecucion
-
-### 1. Levantar infraestructura local
-
-```powershell
-docker compose up -d
-docker ps
-```
-
-Debe quedar activo `banco-postgres` para la base de datos y `banco-kafka` para la mensajeria asincrona.
-
-### 2. Compilar
-
-```powershell
-.\mvnw.cmd compile
-```
-
-### 3. Ejecutar pruebas
-
-```powershell
-.\mvnw.cmd test
-```
-
-### 4. Ejecutar la aplicacion como API
-
-```powershell
-.\mvnw.cmd spring-boot:run
-```
-
-La API queda disponible en:
-
-```text
-https://localhost:8443
-```
-
-Como el certificado es local/autofirmado, en `curl` se usa `-k`.
-
-En PowerShell, para aceptar el certificado local en esta version del entorno, ejecutar primero:
-
-```powershell
-[System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
-```
-
-### 5. Ejecutar jobs batch
-
-Para ejecutar un job especifico:
-
-```powershell
-.\mvnw.cmd spring-boot:run "-Dspring-boot.run.arguments=--spring.batch.job.enabled=true --spring.batch.job.name=transaccionJob"
-```
-
-Jobs disponibles:
-
-```text
-transaccionJob
-interesJob
-estadoCuentaJob
-```
-
-Para que las APIs BFF tengan datos completos, se recomienda ejecutar al menos:
-
-```powershell
-.\mvnw.cmd spring-boot:run "-Dspring-boot.run.arguments=--spring.batch.job.enabled=true --spring.batch.job.name=transaccionJob"
-.\mvnw.cmd spring-boot:run "-Dspring-boot.run.arguments=--spring.batch.job.enabled=true --spring.batch.job.name=interesJob"
-.\mvnw.cmd spring-boot:run "-Dspring-boot.run.arguments=--spring.batch.job.enabled=true --spring.batch.job.name=estadoCuentaJob"
-```
-
-## Seguridad
-
-La seguridad esta implementada con Spring Security y JWT.
-
-Endpoint publico:
-
-```http
-POST /auth/login
-```
-
-Usuarios en memoria:
-
-| Canal | Usuario | Password | Rol |
+| Client (canal) | client_id | client_secret | Scope |
 |---|---|---|---|
-| Web | `web` | `web123` | `ROLE_WEB` |
-| Movil | `movil` | `movil123` | `ROLE_MOVIL` |
-| Cajero | `cajero` | `cajero123` | `ROLE_CAJERO` |
+| Web | `web` | `web123` | `web` |
+| Movil | `movil` | `movil123` | `movil` |
+| Cajero | `cajero` | `cajero123` | `cajero` |
 
-Reglas de autorizacion:
+`bank-batch` actua como Resource Server: valida la firma del token contra `jwk-set-uri` del `auth-server` y autoriza por scope.
 
-- `/api/bff/web/**` requiere rol `WEB`.
-- `/api/bff/movil/**` requiere rol `MOVIL`.
-- `/api/bff/cajero/**` requiere rol `CAJERO`.
-- `/api/debug/**` y `/api/kafka/**` estan permitidos publicamente para pruebas academicas locales.
-- El resto de rutas requiere autenticacion.
+| Ruta | Requiere |
+|---|---|
+| `/api/bff/web/**` | scope `web` |
+| `/api/bff/movil/**` | scope `movil` |
+| `/api/bff/cajero/**` | scope `cajero` |
+| Cualquier otra ruta (incluye `/api/debug/**` y `/api/kafka/**`) | token valido |
 
-El token JWT dura 1 hora.
+Sin token responde `401`. Con un token valido pero de otro canal responde `403`.
 
-### Obtener token
+Nota: `clientes-service` y `cuentas-service` conservan Basic Auth (`admin` / `admin123`) como credencial interna de servicio a servicio; el punto de entrada publico del sistema, `bank-batch`, esta protegido con OAuth 2.0.
+
+### Obtener un token y usarlo
 
 ```powershell
-[System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+$token = (curl.exe -s -u web:web123 -d "grant_type=client_credentials&scope=web" http://localhost:9000/oauth2/token | ConvertFrom-Json).access_token
 
-$login = @{ usuario = "web"; password = "web123" } | ConvertTo-Json
-$tokenWeb = (Invoke-RestMethod -Uri "https://localhost:8443/auth/login" -Method POST -ContentType "application/json" -Body $login).token
+curl.exe -k -H "Authorization: Bearer $token" https://localhost:8443/api/bff/web/resumen
 ```
 
-Respuesta del login:
+Importante: el parametro `scope` es obligatorio en la peticion del token. Sin el, el token se emite sin scopes y el acceso se rechaza con `403`.
 
-```json
-{
-  "usuario": "web",
-  "roles": ["ROLE_WEB"],
-  "token": "jwt-generado",
-  "tipo": "Bearer"
-}
+### Pruebas de seguridad
+
+| Prueba | Resultado esperado |
+|---|---|
+| `GET /api/bff/web/resumen` sin token | `401 Unauthorized` |
+| Mismo endpoint con token del client `web` | `200 OK` |
+| Mismo endpoint con token del client `movil` | `403 Forbidden` |
+
+## Tolerancia a fallos: Resilience4j
+
+`ClientesClient` (en `bank-batch`) aplica tres mecanismos sobre las llamadas a `clientes-service`:
+
+| Mecanismo | Configuracion |
+|---|---|
+| Retry | 3 intentos, 500 ms de espera |
+| Circuit Breaker | ventana de 5 llamadas, minimo 3, abre con 50% de fallos, 5 s en estado abierto |
+| Bulkhead | maximo 5 llamadas concurrentes |
+
+Si el servicio no responde, tras los reintentos se ejecuta `fallbackClientes()` y se devuelve una respuesta controlada en lugar de un error 500. El mecanismo se ubica en quien realiza la llamada remota; `cuentas-service` no tiene consumidores, por lo que no requiere el patron.
+
+Prueba:
+
+```powershell
+curl.exe -k -H "Authorization: Bearer $token" https://localhost:8443/api/debug/clientes   # lista de clientes
+
+docker compose stop clientes-service
+curl.exe -k -H "Authorization: Bearer $token" https://localhost:8443/api/debug/clientes   # fallback
+
+docker compose start clientes-service
 ```
 
-## APIs BFF
+Con el servicio detenido responde: `{"error":"clientes-service no disponible temporalmente"}`.
 
-### BFF Web
-
-```http
-GET /api/bff/web/resumen
-```
-
-```json
-{
-  "canal": "web",
-  "descripcion": "BFF Web Banco XYZ",
-  "resumen": {
-    "transaccionesProcesadas": 1000,
-    "resumenesDiarios": 338,
-    "cuentasConIntereses": 50,
-    "resumenesAnuales": 20
-  }
-}
-```
-
-### BFF Movil
-
-```http
-GET /api/bff/movil/resumen
-```
-
-```json
-{
-  "canal": "movil",
-  "transacciones": 1000,
-  "resumenesDiarios": 338
-}
-```
-
-### BFF Cajero
-
-```http
-GET /api/bff/cajero/saldo/{cuentaId}
-POST /api/bff/cajero/retiro/{cuentaId}
-```
-
-Consultar saldo:
-
-```json
-{
-  "canal": "cajero",
-  "cuentaId": 101,
-  "saldoDisponible": 7960.00
-}
-```
-
-Realizar retiro:
-
-```json
-{
-  "canal": "cajero",
-  "cuentaId": 101,
-  "montoRetirado": 100,
-  "saldoAnterior": 8060.00,
-  "saldoDisponible": 7960.00
-}
-```
-
-## Arquitectura orientada a eventos
-
-La nueva implementacion incorpora Apache Kafka para desacoplar la generacion de eventos de su procesamiento. En este enfoque, `TransaccionProducer` publica mensajes en un topic y `TransaccionConsumer` los procesa de forma asincrona, sin que el cliente que invoca el endpoint dependa directamente del consumidor.
-
-Kafka es apropiado para este caso porque permite separar productores y consumidores, mantener eventos disponibles en el broker y procesarlos mediante un grupo consumidor. Para la demostracion academica, el mensaje enviado representa una transaccion o evento bancario procesado por el sistema.
-
-### Flujo de eventos
-
-```text
-Cliente / Postman
-        |
-        v
-KafkaTestController
-        |
-        v
-TransaccionProducer
-        |
-        v
-Apache Kafka
-Topic: banco.transacciones
-        |
-        v
-TransaccionConsumer
-Consumer Group: bank-batch-group
-```
+## Mensajeria asincrona: Kafka
 
 | Elemento | Implementacion |
 |---|---|
 | Broker | Apache Kafka |
 | Topic | `banco.transacciones` |
 | Producer | `TransaccionProducer` |
-| Consumer | `TransaccionConsumer` |
-| Consumer Group | `bank-batch-group` |
-| Endpoint de prueba | `POST /api/kafka/enviar` |
-| Tipo de comunicacion | Asincrona |
-
-### Endpoint de prueba Kafka
-
-```http
-POST /api/kafka/enviar?mensaje={mensaje}
-```
-
-Ejemplo probado:
-
-```powershell
-curl.exe -k -X POST "https://localhost:8443/api/kafka/enviar?mensaje=SegundoEventoKafka"
-```
-
-Respuesta observada:
+| Consumer | `TransaccionConsumer` (grupo `bank-batch-group`) |
+| Endpoint de prueba | `POST /api/kafka/enviar?mensaje={mensaje}` (requiere token) |
 
 ```text
-Evento enviado a Kafka: SegundoEventoKafka
+Cliente -> KafkaTestController -> TransaccionProducer -> Kafka (banco.transacciones) -> TransaccionConsumer
 ```
 
-### Pruebas Kafka
-
-Enviar evento:
+Prueba:
 
 ```powershell
-curl.exe -k -X POST "https://localhost:8443/api/kafka/enviar?mensaje=PruebaKafkaSemana7"
+curl.exe -k -X POST -H "Authorization: Bearer $token" "https://localhost:8443/api/kafka/enviar?mensaje=PruebaKafkaS8"
+
+docker compose logs bank-batch | findstr "Evento"
 ```
 
-Debe responder con el texto `Evento enviado a Kafka: PruebaKafkaSemana7`.
+En el log aparecen `Evento enviado a Kafka [banco.transacciones]: ...` y `Evento recibido desde Kafka: ...`.
 
-Listar topics:
+## Microservicio principal: bank-batch
 
-```powershell
-docker exec banco-kafka kafka-topics.sh --bootstrap-server localhost:9092 --list
-```
+Procesa archivos CSV bancarios con Spring Batch, guarda los resultados en PostgreSQL y expone los datos mediante APIs BFF separadas por canal (Web, Movil y Cajero), con DTOs especificos por canal.
 
-Debe aparecer el topic `banco.transacciones`.
+| Canal | Endpoint |
+|---|---|
+| Web | `GET /api/bff/web/resumen` |
+| Movil | `GET /api/bff/movil/resumen` |
+| Cajero | `GET /api/bff/cajero/saldo/{cuentaId}` y `POST /api/bff/cajero/retiro/{cuentaId}` |
 
-Ver mensajes:
+Jobs batch disponibles:
 
-```powershell
-docker exec banco-kafka kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic banco.transacciones --from-beginning --timeout-ms 10000
-```
+| Job | Entrada | Resultado |
+|---|---|---|
+| `transaccionJob` | `transacciones.csv` | `transacciones_procesadas` y `resumen_diario` |
+| `interesJob` | `intereses.csv` | `cuentas_intereses` |
+| `estadoCuentaJob` | `cuentas_anuales.csv` | `movimientos_anuales` y `resumen_anual` |
 
-Debe mostrar los mensajes enviados al topic durante las pruebas.
+Los jobs no se ejecutan al iniciar (`spring.batch.job.enabled=false`). 
 
-Comprobar Consumer Group:
+Los steps usan chunks de 5 registros, procesamiento multihilo, reintentos para errores transitorios y una politica de skips con limite de calidad de datos (si se omite mas del 10%, el job falla con `CALIDAD_INSUFICIENTE`).
 
-```powershell
-docker exec banco-kafka kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --group bank-batch-group
-```
+## Evidencia de ejecucion
 
-En la prueba realizada se observo `CURRENT-OFFSET = 2`, `LOG-END-OFFSET = 2` y `LAG = 0`. Esto demuestra que el grupo consumidor proceso todos los mensajes disponibles y no tenia eventos pendientes.
-
-### Diagrama de arquitectura de eventos
-
-Espacio reservado para insertar posteriormente el diagrama realizado en draw.io.
-
-```markdown
-<!-- Agregar aqui la imagen cuando exista dentro del repositorio. Ejemplo:
-![Arquitectura de eventos y tolerancia a fallos](ruta-de-la-imagen)
--->
-```
-
-El diagrama debe representar:
-
-- Cliente/Postman -> Bank Batch -> KafkaTestController -> TransaccionProducer -> Apache Kafka -> Topic `banco.transacciones` -> TransaccionConsumer.
-- Bank Batch / ClientesClient -> clientes-service -> Resilience4j -> `fallbackClientes()`.
-
-## Tolerancia a fallos
-
-`ClientesClient` implementa un Circuit Breaker (Resilience4j) sobre las llamadas hacia `clientes-service`. Si el servicio no responde o falla repetidamente, el circuito se abre y las siguientes peticiones reciben una respuesta de fallback en lugar de un error 500.
-
-La implementacion real utiliza la anotacion:
-
-```java
-@CircuitBreaker(name = "clientesService", fallbackMethod = "fallbackClientes")
-```
-
-`ClientesClient` consume el endpoint:
-
-```text
-http://localhost:8091/api/clientes
-```
-
-```http
-GET /api/debug/clientes
-```
-
-Comportamiento esperado:
-
-- Con `clientes-service` activo: devuelve la lista de clientes obtenida en tiempo real.
-- Con `clientes-service` detenido: Resilience4j ejecuta `fallbackClientes()` y devuelve:
-
-```json
-{"error":"clientes-service no disponible temporalmente"}
-```
-
-- Con `clientes-service` iniciado nuevamente: el endpoint vuelve a entregar la lista de clientes.
-
-Esto demuestra tolerancia a fallos y recuperacion del servicio consumidor sin provocar la caida de `bank-batch`.
-
-### Pruebas Resilience4j
-
-```powershell
-curl.exe -k "https://localhost:8443/api/debug/clientes"
-```
-
-Resultados esperados:
-
-- Con `clientes-service` activo: lista de clientes.
-- Con `clientes-service` detenido: `{"error":"clientes-service no disponible temporalmente"}`.
-- Con `clientes-service` iniciado nuevamente: lista de clientes.
-
-## Consultas utiles
-
-```sql
-SELECT * FROM transacciones_procesadas;
-SELECT * FROM resumen_diario;
-SELECT * FROM cuentas_intereses;
-SELECT * FROM movimientos_anuales;
-SELECT * FROM resumen_anual;
-SELECT * FROM retiros_cajero;
-```
-
-## Evidencias sugeridas para la entrega
-
-Para el informe o presentacion final se recomienda respaldar la implementacion con capturas de Docker, envio y consumo de eventos Kafka, estado del Consumer Group con `LAG = 0`, prueba del fallback de Resilience4j y recuperacion de `clientes-service`. Las imagenes no se referencian en este README porque todavia no existen archivos de evidencias dentro del repositorio.
-
----
-
-# Microservicio: Clientes Service
-
-Microservicio que expone datos de clientes migrados, registrado en Eureka y protegido con Basic Auth. Es consumido por `bank-batch` a traves de un Circuit Breaker con Fallback.
-
-## Tecnologias
-
-- Java 21
-- Spring Boot 4.1.0
-- Spring Cloud 2025.1.2 (Config Client, Eureka Client)
-- Spring Web
-- Spring Security (Basic Auth)
-
-## Configuracion
-
-```properties
-server.port=8091
-spring.application.name=clientes-service
-spring.config.import=optional:configserver:http://localhost:8888
-eureka.client.service-url.defaultZone=http://localhost:8761/eureka/
-eureka.instance.prefer-ip-address=true
-
-app.security.user=admin
-app.security.password=admin123
-```
-
-## Endpoints
-
-```http
-GET /api/clientes
-GET /api/clientes/{id}
-```
-
-Requieren autenticacion Basic Auth (`admin` / `admin123`).
-
-## Ejecucion
-
-```powershell
-.\mvnw.cmd spring-boot:run
-```
-
-## Prueba
-
-```text
-GET http://localhost:8091/api/clientes
-```
-
-- Sin credenciales: `401 Unauthorized`
-- Con Basic Auth: `200 OK` con la lista de clientes
-
----
-
-# Microservicio: Cuentas Service
-
-Microservicio que expone datos de cuentas migradas, registrado en Eureka y protegido con Basic Auth.
-
-## Tecnologias
-
-- Java 21
-- Spring Boot 4.1.0
-- Spring Cloud 2025.1.2 (Config Client, Eureka Client)
-- Spring Web
-- Spring Security (Basic Auth)
-
-## Configuracion
-
-```properties
-server.port=8092
-spring.application.name=cuentas-service
-spring.config.import=optional:configserver:http://localhost:8888
-eureka.client.service-url.defaultZone=http://localhost:8761/eureka/
-eureka.instance.prefer-ip-address=true
-
-app.security.user=admin
-app.security.password=admin123
-```
-
-## Endpoints
-
-```http
-GET /api/cuentas
-GET /api/cuentas/{id}
-```
-
-Requieren autenticacion Basic Auth (`admin` / `admin123`).
-
-## Ejecucion
-
-```powershell
-.\mvnw.cmd spring-boot:run
-```
-
-## Prueba
-
-```text
-GET http://localhost:8092/api/cuentas
-```
-
-- Sin credenciales: `401 Unauthorized`
-- Con Basic Auth: `200 OK` con la lista de cuentas
-
----
-
-## Detener entorno
-
-Detener infraestructura local:
-
-```powershell
-docker compose down
-```
-
-Detener infraestructura local y eliminar el volumen de PostgreSQL:
-
-```powershell
-docker compose down -v
-```
+Las capturas de pantalla estan en el informe de la entrega (OAuth 2.0 con respuestas 401, 200 y 403, construccion de imagenes, `docker compose ps`, Eureka, fallback de Resilience4j y eventos de Kafka).
 
 ## Notas
 
-- El certificado HTTPS incluido en `bank-batch` es para ejecucion local.
-- Las credenciales estan en memoria y son adecuadas solo para demostracion o entorno academico.
-- Para produccion se deberian externalizar secretos, cifrar passwords, renovar la clave JWT y usar un mecanismo de identidad robusto.
+- El certificado HTTPS de `bank-batch` es autofirmado y solo para ejecucion local (`-k` en `curl`).
+- Los secretos (clients OAuth2, base de datos) estan en archivos de configuracion y son adecuados solo para un entorno academico. En produccion se externalizarian y se cifrarian.

@@ -17,6 +17,7 @@ public class SecurityConfig {
                 .requestMatchers("/api/bff/web/**").hasAuthority("SCOPE_web")
                 .requestMatchers("/api/bff/movil/**").hasAuthority("SCOPE_movil")
                 .requestMatchers("/api/bff/cajero/**").hasAuthority("SCOPE_cajero")
+                .requestMatchers("/api/batch/**").hasAuthority("SCOPE_web")
                 .anyRequest().authenticated()
             )
             .oauth2ResourceServer(oauth -> oauth.jwt(Customizer.withDefaults()));

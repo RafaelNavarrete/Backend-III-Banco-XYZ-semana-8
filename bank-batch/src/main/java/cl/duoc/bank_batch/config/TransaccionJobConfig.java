@@ -127,7 +127,7 @@ public class TransaccionJobConfig {
                 "transaccionStep",
                 jobRepository
         )
-                .<Transaccion, Transaccion>chunk(5)
+                .<Transaccion, Transaccion>chunk(100)
                 .transactionManager(transactionManager)
 
                 .reader(transaccionReader)

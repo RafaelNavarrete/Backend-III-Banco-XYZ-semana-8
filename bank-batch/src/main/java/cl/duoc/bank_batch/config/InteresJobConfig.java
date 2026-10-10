@@ -103,7 +103,7 @@ public class InteresJobConfig {
             AsyncTaskExecutor taskExecutor) {
                 
         return new StepBuilder("interesStep", jobRepository)
-                .<CuentaInteres, CuentaInteres>chunk(5)
+                .<CuentaInteres, CuentaInteres>chunk(100)
                 .transactionManager(transactionManager)
                 .reader(interesReader)
                 .processor(interesProcessor)

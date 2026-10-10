@@ -34,6 +34,12 @@ services:
     build: ./config-server
     ports:
       - "8888:8888"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/8888'"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 15s
 
   eureka-server:
     build: ./eureka-server
@@ -47,26 +53,64 @@ services:
 
   clientes-service:
     build: ./clientes-service
-    ports:
-      - "8091:8091"
     environment:
       SPRING_CONFIG_IMPORT: optional:configserver:http://config-server:8888
       EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWKSETURI: http://auth-server:9000/oauth2/jwks
     depends_on:
-      - config-server
-      - eureka-server
+      config-server:
+        condition: service_healthy
+      eureka-server:
+        condition: service_started
+      auth-server:
+        condition: service_started
     restart: on-failure
 
   cuentas-service:
     build: ./cuentas-service
-    ports:
-      - "8092:8092"
     environment:
       SPRING_CONFIG_IMPORT: optional:configserver:http://config-server:8888
       EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWKSETURI: http://auth-server:9000/oauth2/jwks
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
     depends_on:
-      - config-server
-      - eureka-server
+      config-server:
+        condition: service_healthy
+      eureka-server:
+        condition: service_started
+      auth-server:
+        condition: service_started
+      kafka:
+        condition: service_started
+    restart: on-failure
+
+  pagos-service:
+    build: ./pagos-service
+    environment:
+      SPRING_CONFIG_IMPORT: optional:configserver:http://config-server:8888
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWKSETURI: http://auth-server:9000/oauth2/jwks
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    depends_on:
+      config-server:
+        condition: service_healthy
+      eureka-server:
+        condition: service_started
+      auth-server:
+        condition: service_started
+      kafka:
+        condition: service_started
+    restart: on-failure
+
+  api-gateway:
+    build: ./api-gateway
+    ports:
+      - "8080:8080"
+    environment:
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+    depends_on:
+      eureka-server:
+        condition: service_started
     restart: on-failure
 
   bank-batch:
@@ -86,7 +130,7 @@ services:
       kafka:
         condition: service_started
       config-server:
-        condition: service_started
+        condition: service_healthy
       eureka-server:
         condition: service_started
       auth-server:

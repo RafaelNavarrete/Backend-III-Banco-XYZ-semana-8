@@ -139,7 +139,7 @@ public class EstadoCuentaJobConfig {
                 "movimientoAnualStep",
                 jobRepository
         )
-                .<MovimientoAnual, MovimientoAnual>chunk(5)
+                .<MovimientoAnual, MovimientoAnual>chunk(100)
                 .transactionManager(transactionManager)
 
                 .reader(movimientoAnualReader)

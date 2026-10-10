@@ -11,9 +11,14 @@ public class TransaccionConsumer {
             groupId = "bank-batch-group"
     )
     public void recibirMensaje(String mensaje) {
+        System.out.println("Evento recibido desde Kafka: " + mensaje);
+    }
 
-        System.out.println(
-                "Evento recibido desde Kafka: " + mensaje
-        );
+    @KafkaListener(
+            topics = "alertas.seguridad",
+            groupId = "bank-batch-group"
+    )
+    public void recibirAlerta(String mensaje) {
+        System.out.println("ALERTA DE SEGURIDAD recibida: " + mensaje);
     }
 }
